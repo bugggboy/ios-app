@@ -1,0 +1,79 @@
+# XcodeGen 工程定义。
+# 仓库里不存 .xcodeproj —— CI 每次用 `xcodegen generate` 现生成，这样 Windows 上也能改工程配置。
+# 常改的两个地方：PRODUCT_BUNDLE_IDENTIFIER、CFBundleDisplayName。
+name: MyApp
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "15.0"          # 目标：iOS 15 及以上的巨魔机
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"                 # 不启用 Swift 6 严格并发，省掉一堆无谓报错
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    TARGETED_DEVICE_FAMILY: "1"          # 只 iPhone；要 iPad 改成 "1,2"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_BITCODE: "NO"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    # 全流程不做签名：巨魔（TrollStore）安装时会用自己的 ldid 重签。
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  MyApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.myapp
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: MyApp
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}                       # iOS 14+ 必须有，否则界面被上下黑边压缩
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+
+  MyAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: MyApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.myapp.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/MyApp.app/MyApp"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  MyApp:
+    build:
+      targets:
+        MyApp: all
+        MyAppTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - MyAppTests
+    archive:
+      config: Release

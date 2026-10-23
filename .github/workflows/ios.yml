@@ -1,0 +1,160 @@
+name: iOS · 测试 + 未签名 IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["**/*.md"]
+  pull_request:
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: 版本号（留空用 project.yml 里的 1.0）
+        type: string
+        default: ""
+
+permissions:
+  contents: write        # 打 v* 标签时往 Release 挂 IPA 要用
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT: MyApp.xcodeproj
+  SCHEME: MyApp
+  BUNDLE_ID: com.example.myapp
+  IPA_NAME: MyApp-unsigned.ipa
+
+jobs:
+  test:
+    name: 测试 + 启动截图
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        run: xcodegen generate
+
+      - name: 挑一台可用的 iPhone 模拟器
+        id: sim
+        run: |
+          ID=$(xcrun simctl list devices available -j \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; c=[x for k in d for x in d[k] if x.get("isAvailable") and x["name"].startswith("iPhone")]; print(c[0]["udid"] if c else "")')
+          if [ -z "$ID" ]; then echo "runner 上没有可用 iPhone 模拟器"; xcrun simctl list runtimes; exit 1; fi
+          echo "用模拟器 $ID"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: 跑单元测试
+        run: |
+          set -o pipefail
+          rm -rf Test.xcresult
+          xcodebuild test \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath build-sim \
+            -resultBundlePath Test.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee xcodebuild-test.log
+
+      - name: 装机截图（没有 Mac 时主要靠这张图看界面）
+        if: always()
+        run: |
+          set -x
+          DEVICE="${{ steps.sim.outputs.id }}"
+          xcrun simctl boot "$DEVICE" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE" -b || true
+          APP=$(find build-sim/Build/Products -maxdepth 2 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then echo "没找到编译产物，跳过截图"; exit 0; fi
+          xcrun simctl install "$DEVICE" "$APP" || true
+          xcrun simctl launch "$DEVICE" "$BUNDLE_ID" || true
+          sleep 5
+          xcrun simctl io "$DEVICE" screenshot launch.png
+          ls -lh launch.png
+
+      - name: 上传测试报告与截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-${{ github.run_number }}
+          path: |
+            launch.png
+            xcodebuild-test.log
+            Test.xcresult
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ipa:
+    name: 未签名 IPA
+    needs: test
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        run: xcodegen generate
+
+      - name: 编译 Release（完全不签名）
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            MARKETING_VERSION="${{ inputs.marketing_version || '1.0' }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tee xcodebuild-ipa.log
+
+      - name: 打成 Payload/xxx.app 的 ipa
+        run: |
+          set -e
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "产物：$APP_PATH"
+          test -n "$APP_PATH"
+          echo "--- 关键 Info.plist 字段 ---"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Info.plist"
+          if [ -d "$APP_PATH/_CodeSignature" ]; then
+            echo "::error::产物意外带签名，巨魔装机不需要也不应该带"
+            exit 1
+          fi
+          echo "确认未签名 ✓"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP_PATH" out/Payload/
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent out/Payload "$IPA_NAME"
+          ls -lh "$IPA_NAME"
+          echo "--- ipa 顶层结构 ---"
+          unzip -l "$IPA_NAME" | head -15
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-${{ github.run_number }}
+          path: ${{ env.IPA_NAME }}
+          retention-days: 30
+
+      - name: 打 v* 标签时挂到 Release（手机 Safari 直链下载）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+                 --notes "未签名 IPA（iOS 15+），用 TrollStore 安装。"
+          gh release upload "$GITHUB_REF_NAME" "$IPA_NAME" --clobber
