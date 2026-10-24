@@ -46,7 +46,6 @@ jobs:
           path: src
           fetch-depth: 1
           submodules: recursive
-          fetch-depth: 1
 
       - name: 缓存 mpv 依赖
         uses: actions/cache@v4
