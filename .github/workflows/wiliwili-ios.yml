@@ -1,0 +1,312 @@
+name: iOS · wiliwili 构建（iOS 14 兼容）
+
+# M2：用 MPVKit 0.41.0（iOS14 兼容性修复中）（minos 14.0，正好匹配 iOS 14 目标）编 wiliwili 主程序。
+# 这一步大概率第一次不会过，目的是把失败原因一条条逼出来。
+
+on:
+  push:
+    paths:
+      - ".github/workflows/wiliwili-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiliwili-ios
+  cancel-in-progress: true
+
+env:
+  MPVKIT_TAG: "0.41.0"
+  PLACEBO_TAG: "7.351.0"   # 必须 >= 7.351：mpv 0.41 引用了 pl_log_create_351 / pl_cache_*
+  GNUTLS_TAG: "3.8.11"
+  SHADERC_TAG: "2026.1.0"
+  DAV1D_TAG: "1.5.3"
+  ASS_TAG: "0.17.5"
+  BLURAY_TAG: "1.4.0"
+  UCHARDET_TAG: "0.0.8"
+  UAVS3D_TAG: "1.2.1-fix"
+  DOVI_TAG: "3.3.2"
+  MOLTENVK_TAG: "1.4.2"
+  APP_NAME: wiliwili
+
+jobs:
+  build:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      # wiliwili 的 Actions 被 GitHub 关闭，因此在 ios-app 仓库里构建，
+      # 直接 checkout 自己 fork 的源码（已修好 ios_bundle 调用）
+      - uses: actions/checkout@v4
+        with:
+          repository: bugggboy/wiliwili
+          ref: yoga
+          path: src
+          fetch-depth: 1
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: 缓存 mpv 依赖
+        uses: actions/cache@v4
+        with:
+          path: src/.deps/mpv
+          key: mpvkit-full-${{ env.MPVKIT_TAG }}-v8
+
+      - name: 准备 MPVKit（mpv + ffmpeg 静态库 + pkg-config）
+        run: |
+          set -e
+          PREFIX="$PWD/.deps/mpv"
+          mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/lib/pkgconfig" dl
+
+          fetch() {
+            local asset="$1"
+            local repo="${2:-MPVKit}"
+            local tag="${3:-$MPVKIT_TAG}"
+            local out="dl/$asset"
+            if [ ! -f "$out" ]; then
+              curl -sL --retry 3 "https://github.com/mpvkit/${repo}/releases/download/${tag}/${asset}" -o "$out"
+            fi
+            unzip -q -o "$out" -d "dl/x-$asset" 2>/dev/null || { echo "解包失败: $asset"; return 0; }
+            local fw art name real
+            fw=$(find "dl/x-$asset" -type d -path "*/ios-arm64/*.framework" | head -1)
+            if [ -n "$fw" ]; then
+              name=$(basename "$fw" .framework)
+              real=${name#Lib}                    # Libmpv -> mpv
+              cp "$fw/$name" "$PREFIX/lib/lib${real}.a"
+            else
+              # 有些包（如 MoltenVK）不带 .framework，直接给裸的 .a/.dylib
+              art=$(find "dl/x-$asset" -path "*/ios-arm64/*" \( -name "*.a" -o -name "*.dylib" \) | head -1)
+              if [ -z "$art" ]; then
+                echo "跳过（无 ios-arm64 产物）: $asset"
+                ls -R "dl/x-$asset" | head -20
+                return 0
+              fi
+              name=$(basename "$art"); name=${name%.a}; name=${name%.dylib}
+              real=${name#lib}; real=${real#Lib}
+              cp "$art" "$PREFIX/lib/lib${real}.a"
+            fi
+            if [ -d "$fw/Headers" ]; then
+              if [ "$name" = "Libmpv" ]; then
+                cp -R "$fw/Headers/"* "$PREFIX/include/" 2>/dev/null || true
+              else
+                # ffmpeg 等库的头文件不放主 include 路径：libavutil/time.h 会遮蔽系统 <time.h>
+                mkdir -p "$PREFIX/include/ffmpeg"
+                cp -R "$fw/Headers/"* "$PREFIX/include/ffmpeg/" 2>/dev/null || true
+              fi
+            fi
+            echo "已就绪 lib${real}.a"
+          }
+
+          # mpv 本体 + 它依赖的 ffmpeg 各库
+          for a in Libmpv.xcframework.zip \
+                   Libavcodec.xcframework.zip Libavformat.xcframework.zip \
+                   Libavutil.xcframework.zip Libavfilter.xcframework.zip \
+                   Libavdevice.xcframework.zip Libswresample.xcframework.zip \
+                   Libswscale.xcframework.zip; do
+            fetch "$a"
+          done
+
+          # mpv 0.41 的运行时依赖，MPVKit 本体都不内置，要逐个从对应仓库取
+          fetch Libplacebo.xcframework.zip libplacebo-build "$PLACEBO_TAG"
+          fetch Libshaderc_combined.xcframework.zip libshaderc-build "$SHADERC_TAG"
+          fetch gnutls.xcframework.zip gnutls-build "$GNUTLS_TAG"
+          fetch nettle.xcframework.zip gnutls-build "$GNUTLS_TAG"
+          fetch hogweed.xcframework.zip gnutls-build "$GNUTLS_TAG"
+          fetch gmp.xcframework.zip gnutls-build "$GNUTLS_TAG"
+          fetch Libdav1d.xcframework.zip libdav1d-build "$DAV1D_TAG"
+          fetch lcms2.xcframework.zip libplacebo-build "$PLACEBO_TAG"
+          fetch Libass.xcframework.zip libass-build "$ASS_TAG"
+          fetch Libfreetype.xcframework.zip libass-build "$ASS_TAG"
+          fetch Libfribidi.xcframework.zip libass-build "$ASS_TAG"
+          fetch Libharfbuzz.xcframework.zip libass-build "$ASS_TAG"
+          fetch Libunibreak.xcframework.zip libass-build "$ASS_TAG"
+          fetch Libbluray.xcframework.zip libbluray-build "$BLURAY_TAG"
+          fetch Libuchardet.xcframework.zip libuchardet-build "$UCHARDET_TAG"
+          fetch Libuavs3d.xcframework.zip libuavs3d-build "$UAVS3D_TAG"
+          fetch Libdovi.xcframework.zip libdovi-build "$DOVI_TAG"
+          fetch MoltenVK.xcframework.zip moltenvk-build "$MOLTENVK_TAG"
+
+          ls -la "$PREFIX/lib"
+          for f in "$PREFIX/lib"/*.a; do
+            otool -l "$f" | awk -v n="$(basename "$f")" '/minos/{print n, "minos =", $2; exit}'
+          done
+          echo "===== 各静态库提供的 libplacebo 符号 ====="
+          for f in "$PREFIX/lib"/*.a; do
+            if nm -g "$f" 2>/dev/null | grep -q "_pl_vulkan_create"; then echo "libplacebo 在: $f"; fi
+          done
+          for f in "$PREFIX/lib"/*.a; do
+            if nm -g "$f" 2>/dev/null | grep -q "_swr_convert"; then echo "libswresample 在: $f"; fi
+          done
+
+          otool -l "$PREFIX/lib/libmpv.a" | awk '/minos/{print "libmpv minos =",$2; exit}'
+
+          LIBS="-L\${libdir} -lmpv -lass -ldovi -lMoltenVK -lharfbuzz -lfreetype -lfribidi -lunibreak -lbluray -luchardet -luavs3d -lplacebo -lshaderc_combined -ldav1d -llcms2 -lgnutls -lnettle -lhogweed -lgmp -lavformat -lavcodec -lavfilter -lavdevice -lswresample -lswscale -lavutil -lxml2 -lz -lbz2 -liconv"
+          cat > "$PREFIX/lib/pkgconfig/mpv.pc" <<PC
+          prefix=$PREFIX
+          exec_prefix=\${prefix}
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include
+
+          Name: mpv
+          Description: mpv media player client library
+          Version: ${MPVKIT_TAG}
+          Libs: $LIBS
+          Libs.private: $LIBS
+          Cflags: -I\${includedir}
+          PC
+          cat "$PREFIX/lib/pkgconfig/mpv.pc"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+
+      - name: 装 ccache（加速后续增量编译）
+        run: brew install ccache
+
+      - name: 构建 host 版 libromfs-generator
+        run: |
+          set -e
+          cd library/borealis
+          bash build_libromfs_generator.sh
+          cd "$GITHUB_WORKSPACE"
+          ls -la library/borealis/libromfs-generator
+          cp library/borealis/libromfs-generator . || true
+
+      - name: 配置
+        run: |
+          set -x
+          export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+          cmake -S . -B build-ios -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/library/borealis/library/cmake/ios.toolchain.cmake" \
+            -DPLATFORM=OS64 \
+            -DARCHS=arm64 \
+            -DDEPLOYMENT_TARGET=14.0 \
+            -DPLATFORM_IOS=ON \
+            -DIOS_GUI_IDENTIFIER=com.bugggboy.wiliwili \
+            -DIOS_CODE_SIGN_IDENTITY="" \
+            -DDISABLE_WEBP=ON \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DHAVE_H_ERRNO_ASSIGNABLE=0 \
+            -DHAVE_H_ERRNO_ASSIGNABLE_EXITCODE=1 \
+            -DUSE_LIBPSL=OFF \
+            -DCURL_USE_LIBPSL=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-framework,Metal -Wl,-framework,MetalKit -Wl,-framework,QuartzCore -Wl,-framework,IOSurface -Wl,-framework,UIKit -Wl,-framework,CoreGraphics -Wl,-framework,Foundation -Wl,-framework,CoreFoundation -Wl,-framework,CoreVideo -Wl,-framework,IOKit" \
+            -DCMAKE_IGNORE_PATH="/opt/homebrew/lib;/opt/homebrew/include;/opt/homebrew/Cellar;/usr/local/lib;/usr/local/include"
+
+      - name: 编译
+        run: |
+          set -o pipefail
+          cmake --build build-ios -j"$(sysctl -n hw.ncpu)" 2>&1 | tail -150
+
+      - name: 产物校验与打包
+        if: always()
+        run: |
+          APP=$(find build-ios -name "*.app" -maxdepth 4 | head -1)
+          if [ -z "$APP" ]; then echo "::error::没有产出 .app"; find build-ios -maxdepth 2 -type d | head -20; exit 1; fi
+          echo "APP=$APP"
+          ls -la "$APP"
+          BIN=$(find "$APP" -maxdepth 1 -type f -perm +111 | head -1)
+          if [ -z "$BIN" ]; then echo "::error::.app 里没有可执行文件"; ls -la "$APP"; exit 1; fi
+          otool -l "$BIN" | awk '/minos|sdk /{print}' | head -4
+          MINOS=$(otool -l "$BIN" | awk '/minos/{print $2; exit}')
+          echo "main binary minos=$MINOS"
+          case "$MINOS" in
+            14.*) echo "::notice::部署目标 14.0 生效" ;;
+            *) echo "::error::minos=$MINOS，不是 14.x"; exit 1 ;;
+          esac
+
+          # ===== iOS 14 崩溃诊断：找出谁把 libc++ 新 ABI 符号带进来 =====
+          echo "===== 各静态库 minos / stream 类符号引用数 ====="
+          for f in .deps/mpv/lib/*.a; do
+            m=$(otool -l "$f" 2>/dev/null | awk '/minos/{print $2; exit}')
+            h=$(nm -u "$f" 2>/dev/null | c++filt 2>/dev/null | grep -cE "basic_filebuf|basic_ifstream|basic_ofstream|basic_fstream|basic_stringbuf")
+            printf "%-30s minos=%-8s stream_refs=%s\n" "$(basename "$f")" "$m" "$h"
+          done
+          echo "===== 主二进制里 undefined 的 std::__1 符号 ====="
+          nm -u "$BIN" 2>/dev/null | grep -E "_ZN?K?St3__1|_ZTVNSt3__1|_ZTTNSt3__1" | c++filt | sort -u | head -60
+
+          P="$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$P" >/dev/null 2>&1 \
+            || /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 14.0" "$P"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleSupportedPlatforms" "$P" >/dev/null 2>&1 \
+            || { /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms array" "$P"; \
+                 /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms:0 string iPhoneOS" "$P"; }
+          /usr/libexec/PlistBuddy -c "Print :UILaunchScreen" "$P" >/dev/null 2>&1 \
+            || /usr/libexec/PlistBuddy -c "Add :UILaunchScreen dict" "$P"
+          /usr/libexec/PlistBuddy -c "Delete :UIDeviceFamily" "$P" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$P" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$P" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:1 integer 2" "$P" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$P" >/dev/null 2>&1 \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string wiliwili" "$P"
+          /usr/libexec/PlistBuddy -c "Print :UIRequiredDeviceCapabilities" "$P" >/dev/null 2>&1 \
+            || { /usr/libexec/PlistBuddy -c "Add :UIRequiredDeviceCapabilities array" "$P"; \
+                 /usr/libexec/PlistBuddy -c "Add :UIRequiredDeviceCapabilities:0 string arm64" "$P"; }
+
+          # ===== 桌面图标：Assets.xcassets 未编译成 Assets.car，必须给标准命名的 png =====
+          I1024=$(find "$APP/Images.xcassets" -name "1024.png" | head -1)
+          echo "icon source: $I1024"
+          if [ -n "$I1024" ]; then
+            gen() { sips -z "$1" "$1" "$I1024" --out "$APP/$2" >/dev/null 2>&1 || echo "图标失败 $2"; }
+            gen 120 "AppIcon60x60@2x.png"
+            gen 180 "AppIcon60x60@3x.png"
+            gen 152 "AppIcon76x76@2x~ipad.png"
+            gen 167 "AppIcon83.5x83.5@2x~ipad.png"
+            gen 80  "AppIcon40x40@2x.png"
+            gen 120 "AppIcon40x40@3x.png"
+            gen 58  "AppIcon29x29@2x.png"
+            gen 87  "AppIcon29x29@3x.png"
+            ls -la "$APP"/AppIcon*.png
+          fi
+          set_icon_array() {
+            /usr/libexec/PlistBuddy -c "Delete :$1" "$P" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :$1 dict" "$P"
+            /usr/libexec/PlistBuddy -c "Add :$1:CFBundlePrimaryIcon dict" "$P"
+            /usr/libexec/PlistBuddy -c "Add :$1:CFBundlePrimaryIcon:CFBundleIconFiles array" "$P"
+            i=0
+            for n in $2; do
+              /usr/libexec/PlistBuddy -c "Add :$1:CFBundlePrimaryIcon:CFBundleIconFiles:$i string $n" "$P"
+              i=$((i+1))
+            done
+          }
+          set_icon_array CFBundleIcons "AppIcon60x60 AppIcon40x40 AppIcon29x29"
+          set_icon_array "CFBundleIcons~ipad" "AppIcon76x76 AppIcon83.5x83.5"
+
+          echo "----- Info.plist -----"
+          for k in CFBundleIdentifier CFBundleExecutable CFBundleDisplayName MinimumOSVersion UIDeviceFamily UIRequiredDeviceCapabilities; do
+            printf "%-32s = " "$k"; /usr/libexec/PlistBuddy -c "Print :$k" "$P" 2>/dev/null || echo "(缺)"
+          done
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$P" || true
+          plutil -lint "$P"
+
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent out/Payload wiliwili-unsigned.ipa
+          ls -lh wiliwili-unsigned.ipa
+          echo "IPA_SIZE=$(du -h wiliwili-unsigned.ipa | cut -f1)" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wiliwili-ios
+          path: |
+            src/wiliwili-unsigned.ipa
+            src/build-ios/**/*.app/Info.plist
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: 挂到 Release（手机 Safari 直链下载，免登录）
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -f wiliwili-unsigned.ipa ] || exit 0
+          TAG=wiliwili-ios-preview
+          gh release view "$TAG" -R bugggboy/wiliwili >/dev/null 2>&1 \
+            || gh release create "$TAG" -R bugggboy/wiliwili --title "wiliwili for iOS 14+ (unsigned)" \
+                 --notes "wiliwili 的 iOS 移植预览版。未签名，用 TrollStore 安装。最低 iOS 14.0。" \
+                 --latest
+          gh release upload "$TAG" wiliwili-unsigned.ipa --clobber -R bugggboy/wiliwili
