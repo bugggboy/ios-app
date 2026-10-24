@@ -27,7 +27,7 @@ env:
   UCHARDET_TAG: "0.0.8"
   UAVS3D_TAG: "1.2.1-fix"
   DOVI_TAG: "3.3.2"
-  MOLTENVK_TAG: "1.4.2"
+  MOLTENVK_TAG: "1.2.11"   # 1.4.x 用 iOS18/26 SDK 编，会引入 iOS14 没有的 libc++ 符号
   APP_NAME: wiliwili
 
 jobs:
@@ -51,7 +51,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: src/.deps/mpv
-          key: mpvkit-full-${{ env.MPVKIT_TAG }}-v8
+          key: mpvkit-full-${{ env.MPVKIT_TAG }}-mvk${{ env.MOLTENVK_TAG }}
 
       - name: 准备 MPVKit（mpv + ffmpeg 静态库 + pkg-config）
         run: |
@@ -304,8 +304,8 @@ jobs:
         run: |
           [ -f wiliwili-unsigned.ipa ] || exit 0
           TAG=wiliwili-ios-preview
-          gh release view "$TAG" -R bugggboy/wiliwili >/dev/null 2>&1 \
-            || gh release create "$TAG" -R bugggboy/wiliwili --title "wiliwili for iOS 14+ (unsigned)" \
+          gh release view "$TAG" -R bugggboy/ios-app >/dev/null 2>&1 \
+            || gh release create "$TAG" -R bugggboy/ios-app --title "wiliwili for iOS 14+ (unsigned)" \
                  --notes "wiliwili 的 iOS 移植预览版。未签名，用 TrollStore 安装。最低 iOS 14.0。" \
                  --latest
-          gh release upload "$TAG" wiliwili-unsigned.ipa --clobber -R bugggboy/wiliwili
+          gh release upload "$TAG" wiliwili-unsigned.ipa --clobber -R bugggboy/ios-app
